@@ -1,0 +1,11 @@
+{
+  "name": "Repasos Maddog Homes",
+  "short_name": "Repasos",
+  "description": "Gestor de repasos de obra",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fafaf9",
+  "theme_color": "#0c0a09",
+  "orientation": "portrait",
+  "icons": []
+}
