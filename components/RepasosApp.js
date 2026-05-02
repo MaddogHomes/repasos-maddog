@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Upload, ChevronLeft, ChevronRight, AlertTriangle, AlertCircle, CheckCircle2, FileDown, Trash2, Edit2, Loader2, Building2, ArrowLeft, Calendar, MapPin, Plus, Megaphone, X, Check, ImagePlus, FolderOpen, FileText, Clock, MoreVertical, Pencil, Undo2, ArrowUpRight, Circle, Mic, Camera } from 'lucide-react';
+import { Upload, ChevronLeft, ChevronRight, AlertTriangle, AlertCircle, CheckCircle2, FileDown, Trash2, Edit2, Loader2, Building2, ArrowLeft, Calendar, MapPin, Plus, Megaphone, X, Check, ImagePlus, FolderOpen, FileText, Clock, MoreVertical, Pencil, Undo2, ArrowUpRight, Circle, Mic, Camera, LogOut } from 'lucide-react';
+import { supabase, uploadPhotoFromDataUrl, deletePhotoByUrl } from '../lib/supabase';
 
 const GREMIOS = [
   'AIRE ACONDICIONADO', 'ALBAÑILERÍA', 'ASCENSOR', 'APARATOS SANITARIOS',
@@ -16,120 +17,7 @@ const PRIORITIES = [
 
 const getPrio = (id) => PRIORITIES.find(p => p.id === id) || PRIORITIES[1];
 
-// ---------- IndexedDB ----------
-const DB_NAME = 'maddog-repasos';
-const STORE_DEFECTS = 'defects';
-const STORE_OBRA = 'obra';
-const DB_VERSION = 2;
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_DEFECTS)) {
-        db.createObjectStore(STORE_DEFECTS, { keyPath: 'description' });
-      }
-      if (!db.objectStoreNames.contains(STORE_OBRA)) {
-        db.createObjectStore(STORE_OBRA, { keyPath: 'id' });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function getAllDefects() {
-  try {
-    const db = await openDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_DEFECTS, 'readonly');
-      const req = tx.objectStore(STORE_DEFECTS).getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => resolve([]);
-    });
-  } catch { return []; }
-}
-
-async function saveDefect(description, gremio) {
-  if (!description?.trim()) return;
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_DEFECTS, 'readwrite');
-    const store = tx.objectStore(STORE_DEFECTS);
-    const existing = await new Promise(r => {
-      const req = store.get(description);
-      req.onsuccess = () => r(req.result);
-      req.onerror = () => r(null);
-    });
-    if (existing) {
-      existing.count = (existing.count || 1) + 1;
-      existing.lastUsed = Date.now();
-      existing.gremio = gremio;
-      store.put(existing);
-    } else {
-      store.put({ description, gremio, count: 1, lastUsed: Date.now() });
-    }
-  } catch (e) {}
-}
-
-async function clearDefects() {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_DEFECTS, 'readwrite');
-    tx.objectStore(STORE_DEFECTS).clear();
-  } catch {}
-}
-
-async function listObras() {
-  try {
-    const db = await openDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_OBRA, 'readonly');
-      const req = tx.objectStore(STORE_OBRA).getAll();
-      req.onsuccess = () => {
-        const all = req.result || [];
-        all.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
-        resolve(all);
-      };
-      req.onerror = () => resolve([]);
-    });
-  } catch { return []; }
-}
-
-async function getObra(id) {
-  try {
-    const db = await openDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_OBRA, 'readonly');
-      const req = tx.objectStore(STORE_OBRA).get(id);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => resolve(null);
-    });
-  } catch { return null; }
-}
-
-async function putObra(obra) {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_OBRA, 'readwrite');
-    tx.objectStore(STORE_OBRA).put(obra);
-    return new Promise((resolve) => { tx.oncomplete = () => resolve(true); tx.onerror = () => resolve(false); });
-  } catch { return false; }
-}
-
-async function deleteObra(id) {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_OBRA, 'readwrite');
-    tx.objectStore(STORE_OBRA).delete(id);
-  } catch {}
-}
-
-function newObraId() {
-  return `obra_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-}
-
+// ---------- Image compression ----------
 function compressImage(file, maxDim = 1600, quality = 0.85) {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -154,7 +42,8 @@ function compressImage(file, maxDim = 1600, quality = 0.85) {
 
 function relativeTime(ts) {
   if (!ts) return '';
-  const diff = Date.now() - ts;
+  const t = typeof ts === 'string' ? new Date(ts).getTime() : ts;
+  const diff = Date.now() - t;
   const min = Math.floor(diff / 60000);
   const hour = Math.floor(diff / 3600000);
   const day = Math.floor(diff / 86400000);
@@ -162,10 +51,46 @@ function relativeTime(ts) {
   if (min < 60) return `hace ${min} min`;
   if (hour < 24) return `hace ${hour} h`;
   if (day < 7) return `hace ${day} ${day === 1 ? 'día' : 'días'}`;
-  return new Date(ts).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
+  return new Date(t).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-export default function RepasosApp() {
+// ---------- Map DB rows <-> client photo objects ----------
+function dbFotoToPhoto(f) {
+  return {
+    id: f.id,
+    dataUrl: f.photo_url,
+    originalDataUrl: f.original_photo_url || f.photo_url,
+    originalName: f.original_name || '',
+    gremio: f.gremio || '',
+    description: f.description || '',
+    priority: f.priority || 'media',
+    zone: f.zone || '',
+    isGeneral: !!f.is_general,
+    annotations: f.annotations || [],
+    position: f.position || 0,
+    photoUrl: f.photo_url,
+    originalPhotoUrl: f.original_photo_url || f.photo_url,
+  };
+}
+
+function photoToDbFoto(p, obraId, position) {
+  return {
+    obra_id: obraId,
+    position,
+    photo_url: p.photoUrl || p.dataUrl,
+    original_photo_url: p.originalPhotoUrl || p.originalDataUrl || p.dataUrl,
+    original_name: p.originalName || '',
+    gremio: p.gremio || '',
+    description: p.description || '',
+    priority: p.priority || 'media',
+    zone: p.zone || '',
+    is_general: !!p.isGeneral,
+    annotations: p.annotations || [],
+  };
+}
+
+// ---------- Main component ----------
+export default function RepasosApp({ session }) {
   const [screen, setScreen] = useState('library');
   const [activeObraId, setActiveObraId] = useState(null);
   const [obrasList, setObrasList] = useState([]);
@@ -180,6 +105,7 @@ export default function RepasosApp() {
   const [hydrated, setHydrated] = useState(false);
   const [confirmRequest, setConfirmRequest] = useState(null);
   const [downloadHandle, setDownloadHandle] = useState(null);
+  const [loadingObra, setLoadingObra] = useState(false);
 
   const requestConfirm = useCallback(({ message, confirmLabel = 'Eliminar', danger = true }) => {
     return new Promise((resolve) => {
@@ -192,6 +118,7 @@ export default function RepasosApp() {
     setConfirmRequest(null);
   };
 
+  // Load PDF libs
   useEffect(() => {
     let loaded = 0;
     const onload = () => { loaded += 1; if (loaded === 2) setLibsReady(true); };
@@ -203,61 +130,93 @@ export default function RepasosApp() {
     s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
     s2.onload = onload;
     document.head.appendChild(s2);
+  }, []);
 
-    getAllDefects().then(setDefectHistory);
+  // Load defects history from cloud
+  const refreshDefectHistory = useCallback(async () => {
+    const { data } = await supabase
+      .from('defects_history')
+      .select('*')
+      .order('count', { ascending: false })
+      .limit(500);
+    setDefectHistory((data || []).map(d => ({
+      description: d.description,
+      gremio: d.gremio,
+      count: d.count,
+      lastUsed: d.last_used,
+    })));
+  }, []);
+
+  // Load obras list from cloud
+  const refreshObrasList = useCallback(async () => {
+    const { data: obras, error } = await supabase
+      .from('obras')
+      .select('*, fotos(id, photo_url, gremio, is_general, position)')
+      .order('updated_at', { ascending: false });
+    if (error) { console.error(error); return; }
+    setObrasList((obras || []).map(o => ({
+      id: o.id,
+      projectName: o.project_name,
+      reviewDate: o.review_date,
+      lastModified: o.updated_at,
+      createdAt: o.created_at,
+      exportCount: o.export_count || 0,
+      lastExported: o.last_exported,
+      photos: (o.fotos || []).sort((a, b) => (a.position || 0) - (b.position || 0)).map(dbFotoToPhoto),
+    })));
   }, []);
 
   useEffect(() => {
     (async () => {
-      const list = await listObras();
-      const legacy = list.find(o => o.id === 'current');
-      if (legacy && (legacy.photos?.length || legacy.projectName)) {
-        const newId = newObraId();
-        const migrated = { ...legacy, id: newId, lastModified: legacy.lastModified || Date.now(), createdAt: legacy.createdAt || Date.now() };
-        await putObra(migrated);
-        await deleteObra('current');
-        const refreshed = await listObras();
-        setObrasList(refreshed);
-      } else {
-        setObrasList(list);
-      }
+      await refreshObrasList();
+      await refreshDefectHistory();
       setHydrated(true);
     })();
-  }, []);
+  }, [refreshObrasList, refreshDefectHistory]);
 
+  // Realtime: watch for changes in obras and fotos by other users
+  useEffect(() => {
+    const channel = supabase
+      .channel('repasos-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'obras' }, async () => {
+        await refreshObrasList();
+        if (activeObraId) {
+          const { data: o } = await supabase.from('obras').select('*').eq('id', activeObraId).single();
+          if (o) {
+            setProjectName(o.project_name || '');
+            setReviewDate(o.review_date || new Date().toISOString().split('T')[0]);
+          }
+        }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'fotos' }, async (payload) => {
+        const obraId = payload.new?.obra_id || payload.old?.obra_id;
+        if (obraId === activeObraId) {
+          const { data: fotos } = await supabase
+            .from('fotos').select('*').eq('obra_id', activeObraId).order('position', { ascending: true });
+          setPhotos((fotos || []).map(dbFotoToPhoto));
+        }
+        await refreshObrasList();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [activeObraId, refreshObrasList]);
+
+  // Auto-update obra metadata (project name, date) when active and hydrated
   useEffect(() => {
     if (!hydrated || !activeObraId) return;
     setSaveStatus('saving');
     const t = setTimeout(async () => {
-      const existing = await getObra(activeObraId);
-      const payload = {
-        id: activeObraId,
-        projectName,
-        reviewDate,
-        photos,
-        currentIndex,
-        screen,
-        createdAt: existing?.createdAt || Date.now(),
-        lastModified: Date.now(),
-        exportCount: existing?.exportCount || 0,
-        lastExported: existing?.lastExported || null
-      };
-      await putObra(payload);
-      setSaveStatus('saved');
-      const list = await listObras();
-      setObrasList(list);
-    }, 350);
+      const { error } = await supabase.from('obras').update({
+        project_name: projectName,
+        review_date: reviewDate,
+      }).eq('id', activeObraId);
+      if (!error) {
+        setSaveStatus('saved');
+        await refreshObrasList();
+      }
+    }, 500);
     return () => clearTimeout(t);
-  }, [photos, projectName, reviewDate, currentIndex, screen, activeObraId, hydrated]);
-
-  const refreshDefectHistory = useCallback(() => {
-    getAllDefects().then(setDefectHistory);
-  }, []);
-
-  const refreshObrasList = useCallback(async () => {
-    const list = await listObras();
-    setObrasList(list);
-  }, []);
+  }, [projectName, reviewDate, activeObraId, hydrated, refreshObrasList]);
 
   const zones = useMemo(() => {
     const set = new Set();
@@ -287,15 +246,21 @@ export default function RepasosApp() {
   };
 
   const openObra = async (id) => {
-    const obra = await getObra(id);
-    if (!obra) return;
-    setActiveObraId(id);
-    setProjectName(obra.projectName || '');
-    setReviewDate(obra.reviewDate || new Date().toISOString().split('T')[0]);
-    setPhotos(obra.photos || []);
-    setCurrentIndex(Math.min(obra.currentIndex || 0, Math.max(0, (obra.photos?.length || 1) - 1)));
-    const targetScreen = obra.screen && obra.photos?.length > 0 ? obra.screen : (obra.photos?.length > 0 ? 'review' : 'upload');
-    setScreen(targetScreen);
+    setLoadingObra(true);
+    try {
+      const { data: obra } = await supabase.from('obras').select('*').eq('id', id).single();
+      if (!obra) return;
+      const { data: fotos } = await supabase.from('fotos').select('*').eq('obra_id', id).order('position', { ascending: true });
+      setActiveObraId(id);
+      setProjectName(obra.project_name || '');
+      setReviewDate(obra.review_date || new Date().toISOString().split('T')[0]);
+      const ps = (fotos || []).map(dbFotoToPhoto);
+      setPhotos(ps);
+      setCurrentIndex(0);
+      setScreen(ps.length > 0 ? 'review' : 'upload');
+    } finally {
+      setLoadingObra(false);
+    }
   };
 
   const handleDeleteObra = async (id, name) => {
@@ -304,7 +269,17 @@ export default function RepasosApp() {
       confirmLabel: 'Eliminar obra'
     });
     if (!ok) return;
-    await deleteObra(id);
+    // Get photo URLs to delete from storage too
+    const { data: fotos } = await supabase.from('fotos').select('photo_url, original_photo_url').eq('obra_id', id);
+    await supabase.from('obras').delete().eq('id', id);
+    if (fotos) {
+      for (const f of fotos) {
+        await deletePhotoByUrl(f.photo_url);
+        if (f.original_photo_url && f.original_photo_url !== f.photo_url) {
+          await deletePhotoByUrl(f.original_photo_url);
+        }
+      }
+    }
     if (activeObraId === id) {
       goToLibrary();
     } else {
@@ -313,56 +288,169 @@ export default function RepasosApp() {
   };
 
   const handleRenameObra = async (id, newName) => {
-    const obra = await getObra(id);
-    if (!obra) return;
-    await putObra({ ...obra, projectName: newName, lastModified: Date.now() });
+    await supabase.from('obras').update({ project_name: newName }).eq('id', id);
     if (activeObraId === id) setProjectName(newName);
     await refreshObrasList();
   };
 
-  const startReview = async (newPhotos) => {
-    let id = activeObraId;
-    if (!id) {
-      id = newObraId();
-      setActiveObraId(id);
-      const payload = {
-        id,
-        projectName,
-        reviewDate,
-        photos: newPhotos,
-        currentIndex: 0,
-        screen: 'review',
-        createdAt: Date.now(),
-        lastModified: Date.now(),
-        exportCount: 0,
-        lastExported: null
-      };
-      await putObra(payload);
+  // Create new obra and upload first batch of photos
+  const startReview = async (newPhotosBlobs) => {
+    setLoadingObra(true);
+    try {
+      const { data: created, error } = await supabase.from('obras').insert({
+        project_name: projectName,
+        review_date: reviewDate,
+      }).select().single();
+      if (error || !created) {
+        console.error(error);
+        alert('Error al crear la obra. Vuelve a intentarlo.');
+        return;
+      }
+      const obraId = created.id;
+      setActiveObraId(obraId);
+
+      // Upload photos
+      const uploaded = [];
+      for (let i = 0; i < newPhotosBlobs.length; i++) {
+        const p = newPhotosBlobs[i];
+        const url = await uploadPhotoFromDataUrl(p.dataUrl, 'foto');
+        const { data: row } = await supabase.from('fotos').insert(photoToDbFoto({
+          ...p, photoUrl: url, originalPhotoUrl: url,
+        }, obraId, i)).select().single();
+        if (row) uploaded.push(dbFotoToPhoto(row));
+      }
+      setPhotos(uploaded);
+      setCurrentIndex(0);
+      setScreen('review');
+      await refreshObrasList();
+    } catch (e) {
+      console.error(e);
+      alert('Error al subir las fotos. Revisa tu conexión.');
+    } finally {
+      setLoadingObra(false);
     }
-    setPhotos(newPhotos);
-    setCurrentIndex(0);
-    setScreen('review');
   };
 
-  const addMorePhotos = (newPhotos) => {
+  // Add more photos to existing obra
+  const addMorePhotos = async (newPhotosBlobs) => {
+    if (!activeObraId) return;
+    setLoadingObra(true);
+    try {
+      const startPos = photos.length;
+      const uploaded = [];
+      for (let i = 0; i < newPhotosBlobs.length; i++) {
+        const p = newPhotosBlobs[i];
+        const url = await uploadPhotoFromDataUrl(p.dataUrl, 'foto');
+        const { data: row } = await supabase.from('fotos').insert(photoToDbFoto({
+          ...p, photoUrl: url, originalPhotoUrl: url,
+        }, activeObraId, startPos + i)).select().single();
+        if (row) uploaded.push(dbFotoToPhoto(row));
+      }
+      setPhotos(prev => [...prev, ...uploaded]);
+      setCurrentIndex(startPos);
+      if (screen !== 'review') setScreen('review');
+      await refreshObrasList();
+    } catch (e) {
+      console.error(e);
+      alert('Error al subir las fotos. Revisa tu conexión.');
+    } finally {
+      setLoadingObra(false);
+    }
+  };
+
+  // Update one photo (debounced via local state, but persisted on each change)
+  const updatePhoto = useCallback((index, patch) => {
     setPhotos(prev => {
-      const updated = [...prev, ...newPhotos];
-      setCurrentIndex(prev.length);
+      const updated = prev.map((p, i) => i === index ? { ...p, ...patch } : p);
+      const target = updated[index];
+      if (target?.id) {
+        // Persist to DB (fire and forget, debounced lightly via timeout)
+        clearTimeout(window._photoSaveTimer);
+        window._photoSaveTimer = setTimeout(async () => {
+          setSaveStatus('saving');
+          await supabase.from('fotos').update({
+            gremio: target.gremio || '',
+            description: target.description || '',
+            priority: target.priority || 'media',
+            zone: target.zone || '',
+            is_general: !!target.isGeneral,
+            annotations: target.annotations || [],
+            photo_url: target.photoUrl || target.dataUrl,
+            original_photo_url: target.originalPhotoUrl || target.originalDataUrl || target.dataUrl,
+          }).eq('id', target.id);
+          // Bump obra updated_at
+          await supabase.from('obras').update({ project_name: projectName, review_date: reviewDate }).eq('id', activeObraId);
+          setSaveStatus('saved');
+          await refreshObrasList();
+        }, 400);
+      }
       return updated;
     });
-    if (screen !== 'review') setScreen('review');
+  }, [activeObraId, projectName, reviewDate, refreshObrasList]);
+
+  // Special update when annotations change (re-upload the marked image)
+  const updatePhotoWithNewImage = async (index, { dataUrl, annotations, originalDataUrl }) => {
+    const target = photos[index];
+    if (!target?.id) return;
+    setSaveStatus('saving');
+    try {
+      // Upload the new annotated image
+      const newUrl = await uploadPhotoFromDataUrl(dataUrl, 'marked');
+      let originalUrl = target.originalPhotoUrl;
+      // If we don't yet have an original stored separately, upload it now
+      if (!originalUrl || originalUrl === target.photoUrl) {
+        if (originalDataUrl && originalDataUrl !== dataUrl) {
+          originalUrl = await uploadPhotoFromDataUrl(originalDataUrl, 'orig');
+        } else {
+          originalUrl = target.photoUrl;
+        }
+      }
+      // Delete the old marked photo if it was different from original
+      if (target.photoUrl && target.photoUrl !== target.originalPhotoUrl) {
+        await deletePhotoByUrl(target.photoUrl);
+      }
+      // Update in DB
+      await supabase.from('fotos').update({
+        photo_url: newUrl,
+        original_photo_url: originalUrl,
+        annotations: annotations || [],
+      }).eq('id', target.id);
+      // Update local state
+      setPhotos(prev => prev.map((p, i) => i === index ? {
+        ...p,
+        dataUrl: newUrl,
+        originalDataUrl: originalUrl,
+        photoUrl: newUrl,
+        originalPhotoUrl: originalUrl,
+        annotations: annotations || [],
+      } : p));
+      await supabase.from('obras').update({ project_name: projectName, review_date: reviewDate }).eq('id', activeObraId);
+      setSaveStatus('saved');
+      await refreshObrasList();
+    } catch (e) {
+      console.error(e);
+      alert('Error al guardar las marcas.');
+      setSaveStatus('saved');
+    }
   };
 
-  const updatePhoto = (index, patch) => {
-    setPhotos(prev => prev.map((p, i) => i === index ? { ...p, ...patch } : p));
-  };
-
-  const removePhoto = (index) => {
+  const removePhoto = async (index) => {
+    const target = photos[index];
+    if (!target?.id) return;
+    await supabase.from('fotos').delete().eq('id', target.id);
+    if (target.photoUrl) await deletePhotoByUrl(target.photoUrl);
+    if (target.originalPhotoUrl && target.originalPhotoUrl !== target.photoUrl) await deletePhotoByUrl(target.originalPhotoUrl);
     setPhotos(prev => {
       const updated = prev.filter((_, i) => i !== index);
       setCurrentIndex(ci => Math.max(0, Math.min(ci, updated.length - 1)));
+      // Re-number positions in DB (fire and forget)
+      updated.forEach((p, idx) => {
+        supabase.from('fotos').update({ position: idx }).eq('id', p.id);
+      });
       return updated;
     });
+    await supabase.from('obras').update({ project_name: projectName, review_date: reviewDate }).eq('id', activeObraId);
+    await refreshObrasList();
   };
 
   const goToReview = (index) => {
@@ -370,6 +458,39 @@ export default function RepasosApp() {
     setScreen('review');
   };
 
+  const saveDefectToCloud = async (description, gremio) => {
+    if (!description?.trim()) return;
+    const { data: existing } = await supabase
+      .from('defects_history')
+      .select('*')
+      .eq('description', description)
+      .maybeSingle();
+    if (existing) {
+      await supabase.from('defects_history').update({
+        count: (existing.count || 1) + 1,
+        last_used: new Date().toISOString(),
+        gremio: gremio || existing.gremio,
+      }).eq('description', description);
+    } else {
+      await supabase.from('defects_history').insert({
+        description,
+        gremio: gremio || '',
+        count: 1,
+      });
+    }
+    refreshDefectHistory();
+  };
+
+  const clearDefects = async () => {
+    await supabase.from('defects_history').delete().neq('description', '');
+    refreshDefectHistory();
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+  };
+
+  // ---------- PDF generation ----------
   const generatePDFs = async () => {
     if (!libsReady) return;
     setGenerating(true);
@@ -377,7 +498,24 @@ export default function RepasosApp() {
       const { jsPDF } = window.jspdf;
       const zip = new window.JSZip();
 
-      const validPhotos = photos.filter(p => p.gremio);
+      // Pre-load all images as data URLs (since photos are now URLs from Supabase)
+      const photosWithData = await Promise.all(photos.map(async (p) => {
+        try {
+          const res = await fetch(p.dataUrl);
+          const blob = await res.blob();
+          const dataUrl = await new Promise((resolve) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.readAsDataURL(blob);
+          });
+          return { ...p, _dataUrl: dataUrl };
+        } catch (e) {
+          console.warn('Failed to load photo for PDF', e);
+          return { ...p, _dataUrl: p.dataUrl };
+        }
+      }));
+
+      const validPhotos = photosWithData.filter(p => p.gremio);
       const byGremio = {};
       validPhotos.forEach(p => {
         if (!byGremio[p.gremio]) byGremio[p.gremio] = [];
@@ -613,7 +751,7 @@ export default function RepasosApp() {
             const imgW = cellW - 2 * imgPad;
 
             try {
-              const props = pdf.getImageProperties(item.dataUrl);
+              const props = pdf.getImageProperties(item._dataUrl);
               const imgRatio = props.width / props.height;
               const cellRatio = imgW / imgH;
               let drawW, drawH;
@@ -626,7 +764,7 @@ export default function RepasosApp() {
               }
               const dx = cx + imgPad + (imgW - drawW) / 2;
               const dy = imgY + (imgH - drawH) / 2;
-              pdf.addImage(item.dataUrl, 'JPEG', dx, dy, drawW, drawH);
+              pdf.addImage(item._dataUrl, 'JPEG', dx, dy, drawW, drawH);
             } catch (e) {
               pdf.setTextColor(180);
               pdf.setFontSize(8);
@@ -676,16 +814,12 @@ export default function RepasosApp() {
       setDownloadHandle({ url, filename });
 
       if (activeObraId) {
-        const existing = await getObra(activeObraId);
-        if (existing) {
-          await putObra({
-            ...existing,
-            exportCount: (existing.exportCount || 0) + 1,
-            lastExported: Date.now(),
-            lastModified: Date.now()
-          });
-          await refreshObrasList();
-        }
+        const { data: cur } = await supabase.from('obras').select('export_count').eq('id', activeObraId).single();
+        await supabase.from('obras').update({
+          export_count: (cur?.export_count || 0) + 1,
+          last_exported: new Date().toISOString(),
+        }).eq('id', activeObraId);
+        await refreshObrasList();
       }
     } catch (e) {
       console.error(e);
@@ -713,18 +847,32 @@ export default function RepasosApp() {
             </div>
           </button>
           <div className="flex items-center gap-3">
-            <SaveIndicator status={saveStatus} hasData={!!activeObraId && (photos.length > 0 || projectName.length > 0)} />
+            <SaveIndicator status={saveStatus} hasData={!!activeObraId} />
             {screen !== 'library' && (
               <button onClick={goToLibrary} className="text-xs text-stone-600 hover:text-stone-900 flex items-center gap-1 px-2 py-1 rounded hover:bg-stone-100">
                 <FolderOpen size={13} /> Mis obras
               </button>
             )}
+            <button
+              onClick={handleSignOut}
+              className="text-xs text-stone-500 hover:text-red-600 flex items-center gap-1 px-2 py-1 rounded hover:bg-stone-100"
+              title={`Cerrar sesión (${session?.user?.email || ''})`}
+            >
+              <LogOut size={13} />
+            </button>
           </div>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto p-4">
-        {screen === 'library' && (
+        {loadingObra && (
+          <div className="bg-white rounded-xl border border-stone-200 p-10 text-center text-sm text-stone-500 mb-4">
+            <Loader2 size={24} className="mx-auto animate-spin mb-2" />
+            Cargando…
+          </div>
+        )}
+
+        {!loadingObra && screen === 'library' && (
           <LibraryScreen
             obras={obrasList}
             hydrated={hydrated}
@@ -738,15 +886,12 @@ export default function RepasosApp() {
                 message: '¿Borrar todo el historial de descripciones guardadas? Esto no afecta a las obras.',
                 confirmLabel: 'Borrar historial'
               });
-              if (ok) {
-                await clearDefects();
-                refreshDefectHistory();
-              }
+              if (ok) await clearDefects();
             }}
           />
         )}
 
-        {screen === 'upload' && (
+        {!loadingObra && screen === 'upload' && (
           <UploadScreen
             projectName={projectName}
             setProjectName={setProjectName}
@@ -756,15 +901,16 @@ export default function RepasosApp() {
           />
         )}
 
-        {screen === 'review' && photos.length > 0 && (
+        {!loadingObra && screen === 'review' && photos.length > 0 && (
           <ReviewScreen
             photos={photos}
             currentIndex={currentIndex}
             setCurrentIndex={setCurrentIndex}
             updatePhoto={updatePhoto}
+            updatePhotoWithNewImage={updatePhotoWithNewImage}
             removePhoto={removePhoto}
             defectHistory={defectHistory}
-            refreshHistory={refreshDefectHistory}
+            saveDefect={saveDefectToCloud}
             zones={zones}
             onAddMore={addMorePhotos}
             onFinish={() => setScreen('summary')}
@@ -772,7 +918,7 @@ export default function RepasosApp() {
           />
         )}
 
-        {screen === 'summary' && (
+        {!loadingObra && screen === 'summary' && (
           <SummaryScreen
             photos={photos}
             projectName={projectName}
@@ -890,7 +1036,7 @@ function SaveIndicator({ status, hasData }) {
   }
   return (
     <span className="text-xs text-emerald-600 flex items-center gap-1">
-      <Check size={11} /> Guardado
+      <Check size={11} /> Sincronizado
     </span>
   );
 }
@@ -917,7 +1063,7 @@ function LibraryScreen({ obras, hydrated, onOpen, onNew, onDelete, onRename, def
       <div className="flex items-end justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold mb-1">Mis obras</h1>
-          <p className="text-stone-600 text-sm">Todas tus revisiones guardadas. Abre cualquiera para añadir más repasos o re-exportar.</p>
+          <p className="text-stone-600 text-sm">Todas tus revisiones, sincronizadas en la nube. Compartidas con todo el equipo.</p>
         </div>
         <button
           onClick={onNew}
@@ -935,8 +1081,8 @@ function LibraryScreen({ obras, hydrated, onOpen, onNew, onDelete, onRename, def
       ) : obras.length === 0 ? (
         <div className="bg-white rounded-xl border-2 border-dashed border-stone-300 p-10 text-center">
           <Building2 size={36} className="mx-auto text-stone-300 mb-3" />
-          <p className="font-semibold text-stone-700 mb-1">Aún no tienes obras</p>
-          <p className="text-sm text-stone-500 mb-4">Empieza creando tu primera revisión.</p>
+          <p className="font-semibold text-stone-700 mb-1">Aún no hay obras</p>
+          <p className="text-sm text-stone-500 mb-4">Empieza creando la primera revisión.</p>
           <button
             onClick={onNew}
             className="px-5 py-2.5 bg-stone-900 text-white rounded-lg text-sm font-medium hover:bg-stone-800"
@@ -949,11 +1095,12 @@ function LibraryScreen({ obras, hydrated, onOpen, onNew, onDelete, onRename, def
           {obras.map(obra => {
             const photoCount = obra.photos?.length || 0;
             const classifiedCount = obra.photos?.filter(p => p.gremio).length || 0;
-            const generalCount = obra.photos?.filter(p => p.isGeneral && p.gremio).length || 0;
+            const generalCount = obra.photos?.filter(p => p.is_general).length || 0;
             const dateLabel = obra.reviewDate
               ? new Date(obra.reviewDate + 'T00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })
               : '—';
             const isRenaming = renamingId === obra.id;
+            const firstPhotoUrl = obra.photos?.[0]?.photo_url || obra.photos?.[0]?.dataUrl;
 
             return (
               <div key={obra.id} className="bg-white rounded-xl border border-stone-200 hover:border-stone-300 transition-colors overflow-hidden group">
@@ -962,8 +1109,8 @@ function LibraryScreen({ obras, hydrated, onOpen, onNew, onDelete, onRename, def
                     onClick={() => onOpen(obra.id)}
                     className="flex-shrink-0 w-16 h-16 rounded-lg overflow-hidden bg-stone-100 border border-stone-200 hover:border-stone-400 transition-colors"
                   >
-                    {obra.photos?.[0]?.dataUrl ? (
-                      <img src={obra.photos[0].dataUrl} alt="" className="w-full h-full object-cover" />
+                    {firstPhotoUrl ? (
+                      <img src={firstPhotoUrl} alt="" className="w-full h-full object-cover" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-stone-400">
                         <Building2 size={20} />
@@ -1089,14 +1236,15 @@ function AddMoreButton({ onAddMore, label = 'Añadir más fotos' }) {
     for (let i = 0; i < imgs.length; i++) {
       const dataUrl = await compressImage(imgs[i]);
       newPhotos.push({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}-${i}`,
         dataUrl,
+        originalDataUrl: dataUrl,
         originalName: imgs[i].name,
         gremio: '',
         description: '',
         priority: 'media',
         zone: '',
-        isGeneral: false
+        isGeneral: false,
+        annotations: [],
       });
       setProgress(((i + 1) / imgs.length) * 100);
     }
@@ -1164,14 +1312,15 @@ function UploadScreen({ projectName, setProjectName, reviewDate, setReviewDate, 
     for (let i = 0; i < imgs.length; i++) {
       const dataUrl = await compressImage(imgs[i]);
       newPhotos.push({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}-${i}`,
         dataUrl,
+        originalDataUrl: dataUrl,
         originalName: imgs[i].name,
         gremio: '',
         description: '',
         priority: 'media',
         zone: '',
-        isGeneral: false
+        isGeneral: false,
+        annotations: [],
       });
       setProgress(((i + 1) / imgs.length) * 100);
     }
@@ -1185,7 +1334,7 @@ function UploadScreen({ projectName, setProjectName, reviewDate, setReviewDate, 
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold mb-1">Nueva revisión de obra</h1>
-        <p className="text-stone-600 text-sm">Sube las fotos del repaso y clasifícalas por gremio para generar el PDF de cada contratista.</p>
+        <p className="text-stone-600 text-sm">Las fotos se suben a la nube y son visibles para todo el equipo al instante.</p>
       </div>
 
       <div className="bg-white rounded-xl border border-stone-200 p-5 space-y-4">
@@ -1268,7 +1417,7 @@ function UploadScreen({ projectName, setProjectName, reviewDate, setReviewDate, 
   );
 }
 
-function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, removePhoto, defectHistory, refreshHistory, zones, onAddMore, onFinish, requestConfirm }) {
+function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, updatePhotoWithNewImage, removePhoto, defectHistory, saveDefect, zones, onAddMore, onFinish, requestConfirm }) {
   const photo = photos[currentIndex];
   const [description, setDescription] = useState(photo?.description || '');
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -1277,8 +1426,8 @@ function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, remo
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef(null);
 
-  const handleAnnotationSave = ({ dataUrl, annotations, originalDataUrl }) => {
-    updatePhoto(currentIndex, { dataUrl, annotations, originalDataUrl });
+  const handleAnnotationSave = async (data) => {
+    await updatePhotoWithNewImage(currentIndex, data);
     setShowAnnotator(false);
   };
 
@@ -1290,7 +1439,7 @@ function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, remo
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       requestConfirm({
-        message: 'Tu navegador no permite el dictado por voz. Prueba con Chrome, Edge o Safari actualizados (en iOS necesitas Safari).',
+        message: 'Tu navegador no permite el dictado por voz. Prueba con Chrome, Edge o Safari actualizados.',
         confirmLabel: 'Entendido',
         danger: false
       });
@@ -1353,7 +1502,7 @@ function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, remo
   useEffect(() => {
     setDescription(photo?.description || '');
     setNewZone('');
-  }, [currentIndex, photo?.description]);
+  }, [currentIndex, photo?.id]);
 
   const suggestions = useMemo(() => {
     const q = description.trim().toLowerCase();
@@ -1372,7 +1521,6 @@ function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, remo
     saveDescription();
     if (description.trim() && photo.gremio) {
       await saveDefect(description.trim(), photo.gremio);
-      refreshHistory();
     }
     if (currentIndex < photos.length - 1) {
       setCurrentIndex(currentIndex + 1);
@@ -1391,7 +1539,7 @@ function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, remo
       message: '¿Eliminar esta foto? No se incluirá en ningún PDF.',
       confirmLabel: 'Eliminar foto'
     });
-    if (ok) removePhoto(currentIndex);
+    if (ok) await removePhoto(currentIndex);
   };
 
   const commitNewZone = () => {
@@ -1598,7 +1746,6 @@ function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, remo
           <button
             onClick={toggleDictation}
             className={`text-xs flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium transition-colors flex-shrink-0 ${isListening ? 'bg-red-600 text-white' : 'bg-stone-100 text-stone-700 hover:bg-stone-200 border border-stone-200'}`}
-            title={isListening ? 'Pulsa para detener el dictado' : 'Dictar la descripción por voz'}
           >
             {isListening ? (
               <>
@@ -1645,7 +1792,7 @@ function ReviewScreen({ photos, currentIndex, setCurrentIndex, updatePhoto, remo
 
       <div className="bg-white rounded-xl border border-stone-200 p-4">
         <AddMoreButton onAddMore={onAddMore} label="Añadir más fotos a esta obra" />
-        <p className="text-xs text-stone-500 mt-2 text-center">Las nuevas fotos se añaden al final · no se pierde nada de lo que ya has hecho</p>
+        <p className="text-xs text-stone-500 mt-2 text-center">Las nuevas fotos se suben a la nube · disponibles para todo el equipo</p>
       </div>
 
       <div className="flex gap-2 pt-2 sticky bottom-4">
@@ -1698,7 +1845,7 @@ function SummaryScreen({ photos, projectName, reviewDate, obraMeta, onEdit, onDe
       message: '¿Eliminar esta foto? No se incluirá en ningún PDF.',
       confirmLabel: 'Eliminar foto'
     });
-    if (ok) onDelete(index);
+    if (ok) await onDelete(index);
   };
 
   return (
@@ -1876,21 +2023,38 @@ function AnnotationEditor({ photo, onSave, onClose }) {
   const [color, setColor] = useState('#dc2626');
   const [width, setWidth] = useState(8);
   const [imgLoaded, setImgLoaded] = useState(false);
+  const [origDataUrl, setOrigDataUrl] = useState(null);
 
-  const baseImageSrc = photo.originalDataUrl || photo.dataUrl;
+  const baseImageUrl = photo.originalDataUrl || photo.dataUrl;
 
+  // Load image as data URL (need data URL to use canvas without taint)
   useEffect(() => {
     setImgLoaded(false);
     let cancelled = false;
-    const img = new Image();
-    img.onload = () => {
-      if (cancelled) return;
-      imgRef.current = img;
-      setImgLoaded(true);
-    };
-    img.src = baseImageSrc;
+    (async () => {
+      try {
+        const res = await fetch(baseImageUrl, { mode: 'cors' });
+        const blob = await res.blob();
+        const dataUrl = await new Promise((resolve) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.readAsDataURL(blob);
+        });
+        if (cancelled) return;
+        setOrigDataUrl(dataUrl);
+        const img = new Image();
+        img.onload = () => {
+          if (cancelled) return;
+          imgRef.current = img;
+          setImgLoaded(true);
+        };
+        img.src = dataUrl;
+      } catch (e) {
+        console.error('Failed to load image for annotation', e);
+      }
+    })();
     return () => { cancelled = true; };
-  }, [baseImageSrc]);
+  }, [baseImageUrl]);
 
   useEffect(() => {
     if (!imgLoaded) return;
@@ -2074,7 +2238,7 @@ function AnnotationEditor({ photo, onSave, onClose }) {
     onSave({
       dataUrl,
       annotations: strokes,
-      originalDataUrl: photo.originalDataUrl || photo.dataUrl
+      originalDataUrl: origDataUrl || baseImageUrl,
     });
   };
 
@@ -2088,7 +2252,7 @@ function AnnotationEditor({ photo, onSave, onClose }) {
     <div className="fixed inset-0 bg-black z-50 flex flex-col">
       <div className="bg-stone-900 text-white px-3 py-2 flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
-          <button onClick={onClose} className="p-2 hover:bg-stone-800 rounded" title="Cancelar">
+          <button onClick={onClose} className="p-2 hover:bg-stone-800 rounded">
             <X size={18} />
           </button>
           <span className="text-sm font-medium hidden sm:inline">Marcar foto</span>
@@ -2118,7 +2282,6 @@ function AnnotationEditor({ photo, onSave, onClose }) {
                 onClick={() => setColor(c)}
                 className={`w-7 h-7 rounded-full border-2 transition-all ${color === c ? 'border-white scale-110' : 'border-stone-600'}`}
                 style={{ backgroundColor: c }}
-                title={`Color ${c}`}
               />
             ))}
           </div>
@@ -2129,17 +2292,16 @@ function AnnotationEditor({ photo, onSave, onClose }) {
                 key={w}
                 onClick={() => setWidth(w)}
                 className={`w-9 h-9 flex items-center justify-center rounded ${width === w ? 'bg-stone-700' : 'hover:bg-stone-800'}`}
-                title={`Grosor ${w}`}
               >
                 <div className="rounded-full bg-white" style={{ width: Math.max(4, w/2), height: Math.max(4, w/2) }} />
               </button>
             ))}
           </div>
           <div className="w-px h-6 bg-stone-700 mx-1" />
-          <button onClick={undo} disabled={strokes.length === 0} className="p-2 hover:bg-stone-800 rounded disabled:opacity-30 disabled:cursor-not-allowed" title="Deshacer último trazo">
+          <button onClick={undo} disabled={strokes.length === 0} className="p-2 hover:bg-stone-800 rounded disabled:opacity-30">
             <Undo2 size={18} />
           </button>
-          <button onClick={clearAll} disabled={strokes.length === 0} className="p-2 hover:bg-stone-800 rounded disabled:opacity-30 disabled:cursor-not-allowed" title="Borrar todas las marcas">
+          <button onClick={clearAll} disabled={strokes.length === 0} className="p-2 hover:bg-stone-800 rounded disabled:opacity-30">
             <Trash2 size={18} />
           </button>
         </div>
